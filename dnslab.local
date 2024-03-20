@@ -1,0 +1,441 @@
+Install and configure BIND9 on Debian 12 Server - master/slave dns servers
+==========================================================================
+
+Preparation:
+------------
+Ensure that you have installed and configured kea-dhcp4-server and setup a static IP on your host machine NIC. In this documentation, the host machine network is configured to used 'systemd-networkd' as a modern network package while the legacy network files [networking - /etc/network/interfaces and /etc/network/interfaces.d] were disabled.
+
+Install:
+--------
+apt update -y
+apt install bind9 -y
+
+Configurations:
+--------------
+Change directory as follows: cd /etc/bind and edit: named.conf.local with your favourite text editor.
+
+nano named.conf.local:
+---------------------
+// TSIG key for dynamic update
+include "/etc/bind/dnslab-transfer-key";
+
+controls {
+        inet 127.0.0.1 port 953
+                allow { 127.0.0.1; };
+};
+
+server 172.16.10.252 {
+        keys dnslab-transfer-key;
+};
+
+zone "dnslab.local" {
+        type master;
+        file "/var/lib/bind/dnslab.forward-zone";
+        allow-update { key rndc.key; };
+        inline-signing yes;
+        dnssec-policy default;
+        serial-update-method increment;
+};
+
+zone "10.16.172.in-addr.arpa" {
+        type master;
+        file "/var/lib//bind/dnslab.reverse-zone";
+        allow-update { key rndc.key; };
+};
+
+// The 'server 172.16.10.252' directive is for the slave/secondary server
+// The above TSIG-key [/etc/bind/dnslab-transfer-key] was generated with the below syntax:
+// tsig-keygen dnslab-transfer-key
+// Then copy the key and create a new file e.g. /etc/bind/dnslab-transfer-key and
+// paste into the file you created and save it.
+// However, the rndc.key used in { key rndc.key; } is the default key that came
+// with installing bind9.
+// The inline-singing keys [inlin-signing yes;], were generated into /var/cache/bind as
+// a reference directory in named.conf.options. To generate the keys use these syntax:
+// dnssec-keygen -a RSASHA512 -b 2048 -f KSK dnslab.local
+// dnssec-keygen -a RSASHA512 -b 1024 dnslab.local
+// chgrp bind Kdnslab.local.+*
+// chmod g=r,o= Kdnslab.local.+*
+--------------------------------
+
+
+Create the 'forward zone' file for the master/primary dns server:
+nano /var/lib/bind/dnslab.forward-zone:
+---------------------------------------
+; BIND data file for dnslab.local forward zone
+$TTL    604800
+$ORIGIN dnslab.local.
+@       IN      SOA     ns1.dnslab.local. foxhost.dnslab.local. (
+                             12         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@               IN      NS      ns1.dnslab.local.
+@               IN      NS      ns2.dnslab.local.
+
+ns1             IN      A       172.16.10.253
+ns2             IN      A       172.16.10.252
+lab-desktop     IN      A       172.16.10.10
+dnsport         IN      A       172.16.10.240
+dnshost         IN      A       172.16.10.241
+
+// dnsport, dnshost and lab-desktop are host machines in our local subnet
+-------------------------------------------------------------------------
+
+
+Create the 'reverse zone' file for the master/primary dns server:
+nano /var/lib/bind/dnslab.reverse-zone:
+; BIND data file for dnslab.local reverse zone
+$TTL    604800
+$ORIGIN dnslab.local.
+@       IN      SOA     ns1.dnslab.local. foxhost.dnslab.local. (
+                             12         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@               IN      NS      ns1.dnslab.local.
+@               IN      NS      ns2.dnslab.local.
+
+253             IN      PTR       ns1.dnslab.local.
+252             IN      PTR       ns2.dnslab.local.
+10              IN      PTR       lab-desktop.dnslab.local.
+240             IN      PTR       dnsport.dnslab.local
+241             IN      PTR       dnshost.dnslab.local
+
+// For the local dns to resolve the hostnames for all local machines like in the 
+// file above, edit the following files on each machine:
+// /etc/hosts:
+// 127.0.0.1       localhost
+// 172.16.10.240   dnsport.dnslab.local    dnsport
+//
+// /etc/resolv.conf
+// domain dnslab.local
+// search dnslab.local
+// nameserver 172.16.10.253
+// nameserver 172.16.10.252 #Optional as this our secondary/slave dns server
+----------------------------------------------------------------------------
+
+
+Edit named.conf.options file
+nano named.conf.options:
+------------------------
+acl dnslab-subnets {
+        127.0.0.0/8;
+        172.16.10.0/24;
+};
+
+options {
+        directory "/var/cache/bind";
+
+        recursion yes;
+        allow-query { dnslab-subnets; };
+        allow-query-cache { dnslab-subnets; };
+        allow-recursion { dnslab-subnets; };
+
+        empty-zones-enable yes;
+        version "Not currently available!";
+        auth-nxdomain no;
+
+        // forwarders {
+        //      0.0.0.0;
+        // };
+
+        dnssec-validation auto;
+
+        listen-on-v6 { none; };
+        listen-on { 127.0.0.1; 172.16.10.253; };
+};
+
+// For more infomation on 'acl' and 'options' access these links:
+// https://mirror.apps.cam.ac.uk/pub/doc/redhat/redhat7.3/rhl-rg-en-7.3/s1-bind-configuration.html
+// https://www.debian.org/doc/manuals/debian-reference/ch05.en.html#_the_hostname_resolution
+// https://wiki.debian.org/DNSSEC%20Howto%20for%20BIND%209.9+
+// https://bind9.readthedocs.io/en/latest/chapter4.html
+// https://bind9.readthedocs.io/en/latest/chapter5.html
+// Maitrisez la securite des applications "Debian GNU/Linux, 
+// Auteur/Author: Philppe PIERRE Editions, ENI - Avril 2018 www.editions-eni.com
+--------------------------------------------------------------------------------
+
+
+Create a log file: /etc/bind/named.conf.log and the followings:
+nano /etc/bind/named.conf.log:
+------------------------------
+logging {
+        channel update_debug {
+                file "/var/log/update_debug.log" versions 3 size 100k;
+                severity debug;
+                print-severity  yes;
+                print-time      yes;
+        };
+        channel security_info {
+                file "/var/log/security_info.log" versions 1 size 100k;
+                severity info;
+                print-severity  yes;
+                print-time      yes;
+        };
+        channel bind_log {
+                file "/var/log/bind.log" versions 3 size 1m;
+                severity info;
+                print-category  yes;
+                print-severity  yes;
+                print-time      yes;
+        };
+
+        category default { bind_log; };
+        category lame-servers { null; };
+        category update { update_debug; };
+        category update-security { update_debug; };
+        category security { security_info; };
+};
+
+// Also, create 3 new separate files in /var/log as stated in the file above.
+// To create the files use this syntax below:
+// touch /var/log/{update_debug.log,security_info.log,bind.log}
+// Check to see if the files were created: ls -l /var/log
+---------------------------------------------------------
+
+
+Test:
+-----
+systemctl start/restart named.service
+systemctl enable named.service
+systemctl status named.service
+
+Test results:
+-------------
+[root@dnsport bind]# nslookup dnslab.local
+;; Got SERVFAIL reply from 172.16.10.253, trying next server
+Server:		172.16.10.252
+Address:	172.16.10.252#53
+
+;; Got SERVFAIL reply from 172.16.10.253, trying next server
+*** Can't find dnslab.local: No answer
+
+[root@dnsport bind]# 
+[root@dnsport bind]# nslookup ns1.dnslab.local
+;; Got SERVFAIL reply from 172.16.10.253, trying next server
+Server:		172.16.10.252
+Address:	172.16.10.252#53
+
+Name:	ns1.dnslab.local
+Address: 172.16.10.253
+;; Got SERVFAIL reply from 172.16.10.253, trying next server
+
+[root@dnsport bind]# 
+[root@dnsport bind]# dig dnslab.local
+
+; <<>> DiG 9.18.24-1-Debian <<>> dnslab.local
+;; global options: +cmd
+;; Got answer:
+;; WARNING: .local is reserved for Multicast DNS
+;; You are currently testing what happens when an mDNS query is leaked to DNS
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 64942
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 0472eb90441814d00100000065fac7dceea2d9180b69cd06 (good)
+;; QUESTION SECTION:
+;dnslab.local.			IN	A
+
+;; Query time: 0 msec
+;; SERVER: 172.16.10.253#53(172.16.10.253) (UDP)
+;; WHEN: Wed Mar 20 12:26:20 CET 2024
+;; MSG SIZE  rcvd: 69
+
+[root@dnsport bind]# 
+[root@dnsport bind]# dig @localhost dnslab.local
+;; communications error to ::1#53: connection refused
+;; communications error to ::1#53: connection refused
+;; communications error to ::1#53: connection refused
+
+; <<>> DiG 9.18.24-1-Debian <<>> @localhost dnslab.local
+; (2 servers found)
+;; global options: +cmd
+;; Got answer:
+;; WARNING: .local is reserved for Multicast DNS
+;; You are currently testing what happens when an mDNS query is leaked to DNS
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 41722
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 1f9ec1b73417c5950100000065fac7f71ed252703d71995f (good)
+;; QUESTION SECTION:
+;dnslab.local.			IN	A
+
+;; Query time: 0 msec
+;; SERVER: 127.0.0.1#53(localhost) (UDP)
+;; WHEN: Wed Mar 20 12:26:47 CET 2024
+;; MSG SIZE  rcvd: 69
+
+[root@dnsport bind]# 
+[root@dnsport bind]# ping dnshost.dnslab.local -c 4 
+PING dnshost.dnslab.local (172.16.10.241) 56(84) bytes of data.
+64 bytes from dnshost.dnslab.local.10.16.172.in-addr.arpa (172.16.10.241): icmp_seq=1 ttl=64 time=0.628 ms
+64 bytes from dnshost.dnslab.local.10.16.172.in-addr.arpa (172.16.10.241): icmp_seq=2 ttl=64 time=0.886 ms
+64 bytes from dnshost.dnslab.local.10.16.172.in-addr.arpa (172.16.10.241): icmp_seq=3 ttl=64 time=1.37 ms
+64 bytes from dnshost.dnslab.local.10.16.172.in-addr.arpa (172.16.10.241): icmp_seq=4 ttl=64 time=2.04 ms
+
+--- dnshost.dnslab.local ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3006ms
+rtt min/avg/max/mdev = 0.628/1.230/2.040/0.537 ms
+[root@dnsport bind]# 
+[root@dnsport bind]# ping lab-desktop.dnslab.local -c 4 
+PING lab-desktop.dnslab.local (172.16.10.10) 56(84) bytes of data.
+64 bytes from lab-desktop.dnslab.local (172.16.10.10): icmp_seq=1 ttl=64 time=2.07 ms
+64 bytes from lab-desktop.dnslab.local (172.16.10.10): icmp_seq=2 ttl=64 time=1.85 ms
+64 bytes from lab-desktop.dnslab.local (172.16.10.10): icmp_seq=3 ttl=64 time=2.04 ms
+64 bytes from lab-desktop.dnslab.local (172.16.10.10): icmp_seq=4 ttl=64 time=2.56 ms
+
+--- lab-desktop.dnslab.local ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3006ms
+rtt min/avg/max/mdev = 1.846/2.129/2.556/0.261 ms
+[root@dnsport bind]# 
+[root@dnsport bind]# dig -x 172.16.10.253
+
+; <<>> DiG 9.18.24-1-Debian <<>> -x 172.16.10.253
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 20441
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 9d446846b3a579300100000065fac8623252386be05127b2 (good)
+;; QUESTION SECTION:
+;253.10.16.172.in-addr.arpa.	IN	PTR
+
+;; Query time: 0 msec
+;; SERVER: 172.16.10.253#53(172.16.10.253) (UDP)
+;; WHEN: Wed Mar 20 12:28:34 CET 2024
+;; MSG SIZE  rcvd: 83
+
+[root@dnsport bind]# 
+[root@dnsport bind]# dig @localhost -x 172.16.10.253
+;; communications error to ::1#53: connection refused
+;; communications error to ::1#53: connection refused
+;; communications error to ::1#53: connection refused
+
+; <<>> DiG 9.18.24-1-Debian <<>> @localhost -x 172.16.10.253
+; (2 servers found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 64273
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: a6eb572f32084bd70100000065fac8721ff40b1112bac1fc (good)
+;; QUESTION SECTION:
+;253.10.16.172.in-addr.arpa.	IN	PTR
+
+;; Query time: 0 msec
+;; SERVER: 127.0.0.1#53(localhost) (UDP)
+;; WHEN: Wed Mar 20 12:28:50 CET 2024
+;; MSG SIZE  rcvd: 83
+
+// As you can see the test results were successful with no errors.
+------------------------------------------------------------------
+
+
+Now, for the secondary/slave configurations:
+nano named.conf.local:
+---------------------
+// TSIG key for dynamic update
+include "/etc/bind/dnslab-transfer-key";
+
+controls {
+        inet 127.0.0.1 port 953
+                allow { 127.0.0.1; };
+};
+
+server 172.16.10.253 {
+        keys dnslab-transfer-key;
+};
+
+zone "dnslab.local" {
+        type slave;
+        file "/var/cache/bind/dnslab.forward-zone";
+        masters { 172.16.10.253; };
+};
+
+zone "10.16.172.in-addr.arpa" {
+        type slave;
+        file "/var/cache/bind/dnslab.reverse-zone";
+        masters { 172.16.10.253; };
+};
+
+// The 'keys dnslab-transfer-key' is the same generated on the master dns and copied
+// into this file above. Also, the file '/etc/bind/dnslab-transfer-key' copied to the
+// the slave dns server. In addition, both files '//var/cache/bind/dnslab.forward-zone' and
+// '/var/cache/bind/dnslab.reverse-zone' were created as well.
+--------------------------------------------------------------
+
+
+Create forward zone the slave dns server:
+nano /var/cache/bind/dnslab.forward-zone:
+-----------------------------------------
+; BIND data file for dnslab.local forward zone
+$TTL    604800
+@       IN      SOA     ns1.dnslab.local. foxhost.dnslab.local. (
+                              2         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@               IN      NS      ns1.dnslab.local.
+@               IN      NS      ns2.dnslab.local.
+
+ns1             IN      A       172.16.10.253
+ns2             IN      A       172.16.10.252
+---------------------------------------------
+
+
+Create reverse zone the slave dns server:
+nano /var/cache/bind/dnslab.reverse-zone:
+-----------------------------------------
+; BIND data file for dnslab.local reverse zone
+$TTL    604800
+@       IN      SOA     ns1.dnslab.local. foxhost.dnslab.local. (
+                              2         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@               IN      NS      ns1.dnslab.local.
+@               IN      NS      ns2.dnslab.local.
+
+253             IN      PTR       ns1.dnslab.local.
+252             IN      PTR       ns2.dnslab.local.
+
+// These were the only files needed to be configured on the slave dns server, I think.
+// However, I did configured named.conf.options on the slave dns server for tight control
+// same as configured on the master dns server earlier.
+-------------------------------------------------------
+
+Checks:
+-------
+systemctl start/restart named.service
+systemctl enable named.service
+systemctl status named.service
+
+dig @localhost dnslab.local
+dig @localhost ns2.dnslab.local
+dig @localhost -x 172.16.10.252
+
+dig dnslab.local
+dig ns2.dnslab.local
+dig -x 172.16.10.252
+
+nslookup dnslab.local
+nslookup ns2.dnslab.local
+
+// If these steps taken from top to down in this documentation, your DNS servers
+// should be working properly within your local network.
