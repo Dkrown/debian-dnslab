@@ -1,0 +1,388 @@
+Install and configure BIND9 on Ubuntu.22.04 Server - master/slave dns servers
+=============================================================================
+MASTER SERVER
+-------------
+Preparation: configure static interface
+---------------------------------------
+nano /etc/netplan/interface-ens37.yaml 
+network:
+  version: 2
+  ethernets:
+    ens37:
+      addresses:
+        - 10.10.10.235/24
+
+Install:
+--------
+apt update -y
+apt install bind9 -y
+
+Edit: named.conf.local file
+---------------------------
+nano: /etc/bind/named.conf.local
+
+// TSIG Key for dynamic server update
+include "/etc/bind/dnslab.key";
+
+zone "dnslab.net" {
+        type master;
+        file "/var/lib/bind/db.dnslab";
+        allow-transfer { 10.10.10.245; };
+        also-notify { 10.10.10.245; };
+        inline-signing yes;
+};
+
+zone "10.10.10.in-addr.arpa" {
+        type master;
+        file "/var/lib/bind/db.dnslab.172";
+        allow-transfer { 10.10.10.245; };
+        also-notify { 10.10.10.245; };  
+        inline-signing yes;
+};
+
+logging {
+        channel query.log {
+                file "/var/log/named/query.log";
+                severity debug 3;
+        };
+
+        category queries { query.log; };
+};
+// TSIG key generated and added with the 'include' statement
+// To generate a TSIG key use the syntax below:
+// tsig-keygen dnslab.key [dnslab.key was the name I used.]
+//
+// The 'inline-signing' is a zone signing key pair and generated into '/var/cache/bind'
+// with these below syntax:
+// dnssec-keygen -a RSASHA512 -b 2048 -f KSK dnslab.net
+// dnssec-keygen -a RSASHA512 -b 1024 dnslab.net
+// Change permissions as follow:
+// chgrp bind Kdnslab.net.+*
+// chmod g=r,o= Kdnslab.net.+*
+//
+// The '/var/log/named/' directory was created for the local dns log as follow:
+// mkdir /var/log/named
+// chown bind:bind /var/log/named
+// chmod 644
+============
+
+Create the 'forward zone' file for the master dns server:
+---------------------------------------------------------
+nano: /var/lib/bind/db.dnslab
+
+; BIND data file for local ens37 interface
+;
+$TTL    604800
+@       IN      SOA     dnslab.net. root.dnslab.net. (
+                              3         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@               IN      NS      ns.dnslab.net.
+@               IN      NS      ns1.dnslab.net.
+
+@               IN      A       10.10.10.235
+@               IN      A       10.10.10.245
+
+ns              IN      A       10.10.10.235
+ns1             IN      A       10.10.10.245
+lab-desktop     IN      A       10.10.10.75
+===========================================
+
+Create the 'reverse zone' file for the master dns server:
+---------------------------------------------------------
+nano: /var/lib/bind/db.dnslab.172
+
+; BIND reverse data file for local ens37 interface
+;
+$TTL    604800
+@       IN      SOA     ns.dnslab.net. root.dnslab.net. (
+                              3         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@       IN      NS      ns.
+@       IN      NS      ns1.
+
+235     IN      PTR     ns.dnslab.net.
+245     IN      PTR     ns1.dnslab.net.
+75      IN      PTR     lab-desktop.dnslab.net
+==============================================
+
+Edit 'named.conf.options' file:
+-------------------------------
+nano: named.conf.options
+
+// Mnanage ACL for local subnets
+acl dnslab-localnet {
+        127.0.0.0/8;
+        10.10.10.0/24;
+};
+
+options {
+        directory "/var/cache/bind";
+
+
+        // forwarders {
+        //      0.0.0.0;
+        // };
+
+        dnssec-validation auto;
+
+        listen-on-v6 { none; };
+        listen-on { 10.10.10.235; 127.0.0.1; };
+};
+===============================================
+
+
+SECONDARY SERVER
+----------------
+Preparation: configure static interface
+---------------------------------------
+nano /etc/netplan/interface-ens37.yaml 
+network:
+  version: 2
+  ethernets:
+    ens37:
+      addresses:
+        - 10.10.10.245/24
+
+Install:
+--------
+apt update -y
+apt install bind9 -y
+
+Edit: named.conf.local file
+---------------------------
+nano: /etc/bind/named.conf.local
+
+// TSIG Key for dynamic server update
+include "/etc/bind/dnslab.key";
+
+zone "dnslab.net" {
+        type slave;
+        file "/var/lib/bind/db.dnslab";
+        masters { 10.10.10.235; };
+};
+
+zone "10.10.10.in-addr.arpa" {
+        type slave;
+        file "/var/lib/bind/db.dnslab.172";
+        masters { 10.10.10.235; };
+};
+
+// Copy TSIG Key generated for master and added it to the secondary server's
+// BIND9 directory as show above [/etc/bind/dnslab.key]. Without this TSIG Key, the servers
+// will failed to transfer and throw errors. 
+============================================
+
+Edit 'named.conf.options' file:
+-------------------------------
+nano: named.conf.options
+
+// Mnanage ACL for local subnets
+acl dnslab-localnet {
+        127.0.0.0/8;
+        10.10.10.0/24;
+};
+
+options {
+        directory "/var/cache/bind";
+
+
+        // forwarders {
+        //      0.0.0.0;
+        // };
+
+        dnssec-validation auto;
+
+        listen-on-v6 { none; };
+        listen-on { 10.10.10.235; 127.0.0.1; };
+};
+// These are the only files [named.conf.local and named.conf.options] to configured for
+// the slave server. 
+====================
+
+Validation:
+----------
+// Check configuration files with the following syntax:
+named-checkconf
+named-checkconf -z
+named-checkzone dnslab.net /var/lib/bind/db.dnslab
+named-checkzone 10.10.10.235 /var/lib/bind/db.dnslab.172
+// If there is any error check and correct the your conf files
+
+// Restart and check 'named.service' status
+systemctl restart named.service
+systemctl status named.service
+
+TEST CAUTION:
+-------------
+// A quick note, it might be best to remove '/etc/resolv.conf' and make a new one without
+// 'symlink'. If it is not removed/deleted, it can messed up your 'dig', 'nslookup' and
+// ping testing. So, to make a new '/etc/resolv.conf' follow these steps:
+// 1. sudo rm -rf  /etc/resolv.conf
+// 2. sudo touch /etc/resolv.conf
+// 3. sudo nano /etc/resolv.conf
+// 4. add your dns servers IPs and domain as show:
+// nano: /etc/resolv.conf
+// nameserver 10.10.10.235
+// nameserver 10.10.10.245
+// search dnslab.net
+// 5. save and exit
+// 6. restart your network service, in my case - systemd-networkd
+// systemctl restart systemd-networkd
+
+Test results:
+-------------
+[root@dnsmain bind]# dig dnslab.net
+
+; <<>> DiG 9.18.18-0ubuntu0.22.04.2-Ubuntu <<>> dnslab.net
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 23003
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: eaddedc14bfed8040100000065fec221620f707bfb57c77a (good)
+;; QUESTION SECTION:
+;dnslab.net.			IN	A
+
+;; ANSWER SECTION:
+dnslab.net.		604800	IN	A	10.10.10.235
+dnslab.net.		604800	IN	A	10.10.10.245
+
+;; Query time: 0 msec
+;; SERVER: 10.10.10.235#53(10.10.10.235) (UDP)
+;; WHEN: Sat Mar 23 11:50:57 UTC 2024
+;; MSG SIZE  rcvd: 99
+
+[root@dnsmain bind]# 
+[root@dnsmain bind]# dig -x 10.10.10.235
+
+; <<>> DiG 9.18.18-0ubuntu0.22.04.2-Ubuntu <<>> -x 10.10.10.235
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 12463
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: e2c06328def641ca0100000065fec235e434c59c35b3c593 (good)
+;; QUESTION SECTION:
+;235.10.10.10.in-addr.arpa.	IN	PTR
+
+;; ANSWER SECTION:
+235.10.10.10.in-addr.arpa. 604800 IN	PTR	ns.dnslab.net.
+
+;; Query time: 0 msec
+;; SERVER: 10.10.10.235#53(10.10.10.235) (UDP)
+;; WHEN: Sat Mar 23 11:51:17 UTC 2024
+;; MSG SIZE  rcvd: 109
+
+[root@dnsmain bind]# 
+[root@dnsmain bind]# dig + @10.10.10.235 A dnslab.net
+;; Invalid option 
+
+; <<>> DiG 9.18.18-0ubuntu0.22.04.2-Ubuntu <<>> + @10.10.10.235 A dnslab.net
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 49466
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: b20925cf63e410f60100000065fec2745b9b3af52249530a (good)
+;; QUESTION SECTION:
+;dnslab.net.			IN	A
+
+;; ANSWER SECTION:
+dnslab.net.		604800	IN	A	10.10.10.235
+dnslab.net.		604800	IN	A	10.10.10.245
+
+;; Query time: 0 msec
+;; SERVER: 10.10.10.235#53(10.10.10.235) (UDP)
+;; WHEN: Sat Mar 23 11:52:21 UTC 2024
+;; MSG SIZE  rcvd: 99
+
+[root@dnsmain bind]# 
+[root@dnsmain bind]# dig + @10.10.10.235 NS dnslab.net
+;; Invalid option 
+
+; <<>> DiG 9.18.18-0ubuntu0.22.04.2-Ubuntu <<>> + @10.10.10.235 NS dnslab.net
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 43506
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 3
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 62a7ad45ef23ce980100000065fec28417dcfaedc6b839f9 (good)
+;; QUESTION SECTION:
+;dnslab.net.			IN	NS
+
+;; ANSWER SECTION:
+dnslab.net.		604800	IN	NS	ns.dnslab.net.
+dnslab.net.		604800	IN	NS	ns1.dnslab.net.
+
+;; ADDITIONAL SECTION:
+ns.dnslab.net.		604800	IN	A	10.10.10.235
+ns1.dnslab.net.		604800	IN	A	10.10.10.245
+
+;; Query time: 0 msec
+;; SERVER: 10.10.10.235#53(10.10.10.235) (UDP)
+;; WHEN: Sat Mar 23 11:52:36 UTC 2024
+;; MSG SIZE  rcvd: 134
+
+[root@dnsmain bind]# 
+[root@dnsmain bind]# 
+[root@dnsmain bind]# ping dnslab.net -c 4; ping ns1.dnslab.net -c 4; ping lab-desktop.dnslab.net -c 4;
+PING dnslab.net (10.10.10.235) 56(84) bytes of data.
+64 bytes from ns.dnslab.net (10.10.10.235): icmp_seq=1 ttl=64 time=0.017 ms
+64 bytes from ns.dnslab.net (10.10.10.235): icmp_seq=2 ttl=64 time=0.103 ms
+64 bytes from ns.dnslab.net (10.10.10.235): icmp_seq=3 ttl=64 time=0.026 ms
+64 bytes from ns.dnslab.net (10.10.10.235): icmp_seq=4 ttl=64 time=0.028 ms
+
+--- dnslab.net ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3005ms
+rtt min/avg/max/mdev = 0.017/0.043/0.103/0.034 ms
+PING ns1.dnslab.net (10.10.10.245) 56(84) bytes of data.
+64 bytes from ns1.dnslab.net (10.10.10.245): icmp_seq=1 ttl=64 time=1.09 ms
+64 bytes from ns1.dnslab.net (10.10.10.245): icmp_seq=2 ttl=64 time=0.798 ms
+64 bytes from ns1.dnslab.net (10.10.10.245): icmp_seq=3 ttl=64 time=0.672 ms
+64 bytes from ns1.dnslab.net (10.10.10.245): icmp_seq=4 ttl=64 time=0.743 ms
+
+--- ns1.dnslab.net ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3005ms
+rtt min/avg/max/mdev = 0.672/0.826/1.092/0.159 ms
+PING lab-desktop.dnslab.net (10.10.10.75) 56(84) bytes of data.
+64 bytes from lab-desktop.dnslab.net.10.10.10.in-addr.arpa (10.10.10.75): icmp_seq=1 ttl=64 time=0.688 ms
+64 bytes from lab-desktop.dnslab.net.10.10.10.in-addr.arpa (10.10.10.75): icmp_seq=2 ttl=64 time=0.632 ms
+64 bytes from lab-desktop.dnslab.net.10.10.10.in-addr.arpa (10.10.10.75): icmp_seq=3 ttl=64 time=0.688 ms
+64 bytes from lab-desktop.dnslab.net.10.10.10.in-addr.arpa (10.10.10.75): icmp_seq=4 ttl=64 time=0.684 ms
+
+--- lab-desktop.dnslab.net ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3005ms
+rtt min/avg/max/mdev = 0.632/0.673/0.688/0.023 ms
+[root@dnsmain bind]# 
+[root@dnsmain bind]# nslookup dnslab.net
+Server:		10.10.10.235
+Address:	10.10.10.235#53
+
+Name:	dnslab.net
+Address: 10.10.10.245
+Name:	dnslab.net
+Address: 10.10.10.235
+=====================
+
+Here you have it, and it's mostly all you need to get your master/slave running.
+For more advance settings see https://bind9.readthedocs.io/en/latest/ and 
+OS specific starting point check https://ubuntu.com/server/docs/service-domain-name-service-dns
+
